@@ -1,250 +1,355 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
-import useSWR from 'swr';
-import { fetcher } from '@/lib/api';
+import { useEffect, useRef } from 'react';
 
-const DUBAI_CENTER: [number, number] = [25.2048, 55.2708];
+interface Feature {
+  id: string;
+  title: string;
+  location?: { lat: number; lng: number; name: string };
+  isMilitary?: boolean;
+  category?: string;
+  source?: string;
+  publishedAt?: string;
+  url?: string;
+}
 
-const GIBS_LAYERS = [
-  { id: null, name: '🗺️ Map Only', url: null, maxZoom: 18 },
-  { id: 'VIIRS_TrueColor', name: '🌍 True Color', url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/{date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg', maxZoom: 9 },
-  { id: 'MODIS_FalseColor', name: '🔥 Fire Detection', url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_CorrectedReflectance_Bands721/default/{date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg', maxZoom: 9 },
-  { id: 'VIIRS_NightLights', name: '🌙 Night Lights', url: 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_DayNightBand_ENCC/default/{date}/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg', maxZoom: 8 },
-];
+interface Flight {
+  icao24: string;
+  callsign?: string;
+  lat: number;
+  lng: number;
+  altitude?: number;
+  velocity?: number;
+  heading?: number;
+  isMilitary?: boolean;
+  isEmergency?: boolean;
+  squawk?: string;
+  originCountry?: string;
+  onGround?: boolean;
+}
 
-interface Props {
-  features: any[];
-  selectedFeature?: any;
-  onFeatureSelect?: (f: any) => void;
+interface Ship {
+  mmsi: string;
+  name: string;
+  lat: number;
+  lng: number;
+  speed?: number;
+  heading?: number;
+  isMilitary?: boolean;
+  isCarrier?: boolean;
+  flag?: string;
+  destination?: string;
+}
+
+interface MapViewProps {
+  features: Feature[];
+  selectedFeature: Feature | null;
+  onFeatureSelect: (f: Feature) => void;
   militaryHighlight?: boolean;
   showFlights?: boolean;
   showShips?: boolean;
+  allFlights?: Flight[];
+  showAllFlights?: boolean;
+  ships?: Ship[];
 }
 
-export default function MapView({ features, selectedFeature, onFeatureSelect, showFlights = true, showShips = true }: Props) {
-  const mapRef = useRef<any>(null);
-  const mapContainerRef = useRef<HTMLDivElement>(null);
-  const markersRef = useRef<Record<string, any>>({});
-  const flightMarkersRef = useRef<Record<string, any>>({});
-  const shipMarkersRef = useRef<Record<string, any>>({});
-  const satelliteLayerRef = useRef<any>(null);
+const popupStyle = `
+  font-family:'JetBrains Mono',monospace;
+  background:#0c1018;
+  padding:10px 12px;
+  min-width:200px;
+  max-width:300px;
+`;
 
-  const [selectedLayer, setSelectedLayer] = useState(GIBS_LAYERS[0]);
-  const [layerOpacity, setLayerOpacity] = useState(0.7);
-  const [showLayerPanel, setShowLayerPanel] = useState(false);
-  const [isMapReady, setIsMapReady] = useState(false);
+function makeAircraftSvg(color: string, glow: string, heading: number, size: number) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24"
+    style="filter:drop-shadow(0 0 4px ${glow});transform:rotate(${heading}deg);display:block;">
+    <path d="M12 2L8.5 10H3L9 14L7 22L12 18.5L17 22L15 14L21 10H15.5L12 2Z"
+      fill="${color}" stroke="rgba(0,0,0,0.5)" stroke-width="0.8"/>
+  </svg>`;
+}
 
-  const imageDate = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    return d.toISOString().split('T')[0];
-  })();
+function makeShipSvg(color: string, glow: string) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"
+    style="filter:drop-shadow(0 0 5px ${glow});display:block;">
+    <path d="M4 17L6 8H18L20 17L12 21Z" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="0.8"/>
+    <rect x="10.5" y="3" width="3" height="6" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="0.8"/>
+  </svg>`;
+}
 
-  const { data: flightData } = useSWR('/flights', fetcher, { refreshInterval: 180000 });
-  const { data: shipData } = useSWR('/ships', fetcher, { refreshInterval: 300000 });
+function makeEventSvg(color: string, glow: string, pulse: boolean, innerR: number, outerSize: number) {
+  const pulseRing = pulse ? `
+    <circle cx="${outerSize/2}" cy="${outerSize/2}" r="${innerR + 4}" fill="none" stroke="${color}" stroke-width="1" opacity="0.4">
+      <animate attributeName="r" values="${innerR+2};${innerR+10};${innerR+2}" dur="2.5s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.5;0;0.5" dur="2.5s" repeatCount="indefinite"/>
+    </circle>` : '';
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${outerSize}" height="${outerSize}" viewBox="0 0 ${outerSize} ${outerSize}"
+    style="filter:drop-shadow(0 0 3px ${glow});display:block;">
+    ${pulseRing}
+    <circle cx="${outerSize/2}" cy="${outerSize/2}" r="${innerR}" fill="${color}" stroke="rgba(0,0,0,0.5)" stroke-width="1.2"/>
+  </svg>`;
+}
 
-  // Init map
+export default function MapView({
+  features,
+  selectedFeature,
+  onFeatureSelect,
+  showFlights = true,
+  showShips = true,
+  allFlights = [],
+  showAllFlights = false,
+  ships = [],
+}: MapViewProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef       = useRef<any>(null);
+  const layersRef    = useRef<{ events: any; flights: any; ships: any }>({
+    events: null, flights: null, ships: null,
+  });
+  const LRef = useRef<any>(null);
+
+  // ── Init map once ────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapContainerRef.current || mapRef.current) return;
+    if (mapRef.current || !containerRef.current) return;
+
     import('leaflet').then((L) => {
+      LRef.current = L;
+
+      // Fix Leaflet icon URLs (needed in Next.js)
       delete (L.Icon.Default.prototype as any)._getIconUrl;
       L.Icon.Default.mergeOptions({
-        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+        iconUrl:       'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+        iconRetinaUrl:'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+        shadowUrl:     'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
       });
-      const map = L.map(mapContainerRef.current!, { center: DUBAI_CENTER, zoom: 6 });
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors', maxZoom: 18,
+
+      const map = L.map(containerRef.current!, {
+        center: [24, 54],
+        zoom: 5,
+        zoomControl: false,
+        attributionControl: false,
+      });
+
+      // Dark tile layer
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19,
+        subdomains: 'abcd',
       }).addTo(map);
+
+      // Minimal attribution
+      L.control.attribution({ prefix: '' }).addTo(map);
+      L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+      layersRef.current.events  = L.layerGroup().addTo(map);
+      layersRef.current.flights = L.layerGroup().addTo(map);
+      layersRef.current.ships   = L.layerGroup().addTo(map);
+
       mapRef.current = map;
-      setIsMapReady(true);
     });
+
     return () => {
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
     };
   }, []);
 
-  // Satellite layer
-  const updateSatelliteLayer = useCallback(async (layer: any, opacity: number) => {
-    if (!mapRef.current) return;
-    const L = await import('leaflet');
-    if (satelliteLayerRef.current) {
-      mapRef.current.removeLayer(satelliteLayerRef.current);
-      satelliteLayerRef.current = null;
-    }
-    if (!layer.url) return;
-    const tileUrl = layer.url.replace('{date}', imageDate);
-    const newLayer = L.tileLayer(tileUrl, { opacity, maxZoom: layer.maxZoom, crossOrigin: true });
-    newLayer.addTo(mapRef.current);
-    newLayer.setZIndex(200);
-    satelliteLayerRef.current = newLayer;
-  }, [imageDate]);
-
+  // ── Event / news markers ─────────────────────────────────────────
   useEffect(() => {
-    if (isMapReady) updateSatelliteLayer(selectedLayer, layerOpacity);
-  }, [selectedLayer, layerOpacity, isMapReady, updateSatelliteLayer]);
+    const L = LRef.current;
+    if (!L || !mapRef.current || !layersRef.current.events) return;
+    const layer = layersRef.current.events;
+    layer.clearLayers();
 
-  // News markers
-  useEffect(() => {
-    if (!isMapReady || !mapRef.current) return;
-    import('leaflet').then((L) => {
-      Object.values(markersRef.current).forEach((m: any) => m.remove());
-      markersRef.current = {};
-      features.forEach((f) => {
-        if (!f.location) return;
-        const color = f.isMilitary ? '#dc2626' : ({ security: '#ea580c', politics: '#7c3aed', economy: '#059669' } as any)[f.category] || '#2563eb';
-        const icon = L.divIcon({
-          className: '',
-          html: `<div style="width:12px;height:12px;background:${color};border:2px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.5);${f.isMilitary ? 'animation:pulse 2s infinite;' : ''}"></div>`,
-          iconSize: [12, 12], iconAnchor: [6, 6],
-        });
-        const marker = L.marker([f.location.lat, f.location.lng], { icon, zIndexOffset: f.isMilitary ? 1000 : 0 });
-        marker.bindPopup(`
-          <div style="max-width:260px;font-family:system-ui">
-            <span style="background:${color};color:white;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700">${(f.category || '').toUpperCase()}</span>
-            ${f.isMilitary ? '<span style="color:#dc2626;margin-left:4px">⚠️</span>' : ''}
-            <p style="margin:8px 0 4px;font-size:13px;font-weight:600">${f.title}</p>
-            <p style="margin:0;font-size:11px;color:#666">📍 ${f.location?.name} · ${f.source}</p>
-            <a href="${f.url}" target="_blank" style="display:block;margin-top:8px;text-align:center;background:#2563eb;color:white;padding:4px;border-radius:6px;font-size:12px;text-decoration:none">Read →</a>
-          </div>
-        `);
-        marker.on('click', () => onFeatureSelect?.(f));
-        marker.addTo(mapRef.current!);
-        markersRef.current[f.id] = marker;
+    features.forEach((f) => {
+      if (!f.location?.lat || !f.location?.lng) return;
+      const mil  = !!f.isMilitary;
+      const color = mil ? '#ff3333' : f.category === 'security' ? '#ff6b35' : '#4da6ff';
+      const glow  = mil ? 'rgba(255,51,51,0.7)' : 'rgba(77,166,255,0.4)';
+      const size  = mil ? 26 : 20;
+      const r     = mil ? 6 : 4;
+
+      const icon = L.divIcon({
+        html: makeEventSvg(color, glow, mil, r, size),
+        className: '',
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
       });
-    });
-  }, [features, isMapReady, onFeatureSelect]);
 
-  // Flight markers
-  useEffect(() => {
-    if (!isMapReady || !mapRef.current || !showFlights) return;
-    import('leaflet').then((L) => {
-      Object.values(flightMarkersRef.current).forEach((m: any) => m.remove());
-      flightMarkersRef.current = {};
-      const flights = flightData?.flights || [];
-      flights.forEach((f: any) => {
-        if (!f.lat || !f.lng || f.onGround) return;
-        const icon = L.divIcon({
-          className: '',
-          html: `<div style="transform:rotate(${f.heading || 0}deg);font-size:${f.isMilitary ? '16' : '12'}px;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.8))">✈️</div>`,
-          iconSize: [16, 16], iconAnchor: [8, 8],
-        });
-        const marker = L.marker([f.lat, f.lng], { icon, zIndexOffset: 500 });
-        marker.bindPopup(`
-          <div style="font-family:system-ui;max-width:220px">
-            <p style="margin:0 0 4px;font-weight:700;color:${f.isMilitary ? '#f59e0b' : '#60a5fa'}">${f.isMilitary ? '⚠️ MILITARY' : '✈️'} ${f.callsign || 'Unknown'}</p>
-            <p style="margin:0;font-size:11px;color:#666">🌍 ${f.originCountry}</p>
-            <p style="margin:0;font-size:11px;color:#666">📡 ${Math.round((f.altitude || 0) * 3.281)}ft · ${Math.round((f.velocity || 0) * 1.944)}kts</p>
-            <p style="margin:0;font-size:11px;color:#666">🧭 ${Math.round(f.heading || 0)}°</p>
-            ${f.squawk ? `<p style="margin:0;font-size:11px;color:#666">📟 Squawk: ${f.squawk}</p>` : ''}
+      const marker = L.marker([f.location.lat, f.location.lng], { icon, zIndexOffset: mil ? 2000 : 100 });
+      marker.bindPopup(`
+        <div style="${popupStyle}border:1px solid ${mil ? 'rgba(255,51,51,0.4)' : '#1a2030'};">
+          <div style="font-size:7px;color:${color};letter-spacing:2px;margin-bottom:6px;">
+            ${mil ? '⚠ MILITARY EVENT' : (f.category || 'INTEL').toUpperCase()}
           </div>
-        `);
-        marker.addTo(mapRef.current!);
-        flightMarkersRef.current[f.icao24] = marker;
-      });
-    });
-  }, [flightData, isMapReady, showFlights]);
+          <div style="font-size:10px;color:#c8d4e0;line-height:1.45;margin-bottom:6px;">${f.title}</div>
+          <div style="font-size:8px;color:#c8a84b;">📍 ${f.location.name}</div>
+          ${f.source ? `<div style="font-size:7px;color:#2a3040;margin-top:4px;letter-spacing:1px;">SRC: ${f.source.toUpperCase()}</div>` : ''}
+          ${f.url ? `<a href="${f.url}" target="_blank" style="font-size:7px;color:#c8a84b;display:block;margin-top:5px;text-decoration:none;letter-spacing:1px;">READ →</a>` : ''}
+        </div>`, { closeButton: false, className: 'gulf-popup' });
 
-  // Ship markers
-  useEffect(() => {
-    if (!isMapReady || !mapRef.current || !showShips) return;
-    import('leaflet').then((L) => {
-      Object.values(shipMarkersRef.current).forEach((m: any) => m.remove());
-      shipMarkersRef.current = {};
-      const ships = shipData?.ships || [];
-      ships.forEach((s: any) => {
-        if (!s.lat || !s.lng) return;
-        const icon = L.divIcon({
-          className: '',
-          html: `<div style="font-size:${s.isCarrier ? '20' : '14'}px;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.9))">${s.isCarrier ? '🛸' : '🚢'}</div>`,
-          iconSize: [20, 20], iconAnchor: [10, 10],
-        });
-        const marker = L.marker([s.lat, s.lng], { icon, zIndexOffset: s.isCarrier ? 2000 : 800 });
-        marker.bindPopup(`
-          <div style="font-family:system-ui;max-width:220px">
-            <p style="margin:0 0 4px;font-weight:700;color:${s.isMilitary ? '#dc2626' : '#10b981'}">${s.isMilitary ? '⚔️ MILITARY' : '🚢'} ${s.name}</p>
-            ${s.isCarrier ? '<p style="margin:0;font-size:11px;color:#dc2626;font-weight:600">AIRCRAFT CARRIER</p>' : ''}
-            <p style="margin:0;font-size:11px;color:#666">🏴 ${s.flag || 'Unknown'} · ⚡ ${(s.speed || 0).toFixed(1)} knots</p>
-            <p style="margin:0;font-size:11px;color:#666">🧭 ${Math.round(s.heading || 0)}°</p>
-            ${s.destination ? `<p style="margin:0;font-size:11px;color:#666">🎯 ${s.destination}</p>` : ''}
-          </div>
-        `);
-        marker.addTo(mapRef.current!);
-        shipMarkersRef.current[s.mmsi] = marker;
-      });
+      marker.on('click', () => onFeatureSelect(f));
+      layer.addLayer(marker);
     });
-  }, [shipData, isMapReady, showShips]);
+  }, [features, onFeatureSelect]);
 
-  // Pan to selected
+  // ── Pan to selected ──────────────────────────────────────────────
   useEffect(() => {
-    if (selectedFeature?.location && mapRef.current) {
-      mapRef.current.flyTo([selectedFeature.location.lat, selectedFeature.location.lng], 10, { animate: true, duration: 1 });
-      markersRef.current[selectedFeature.id]?.openPopup();
-    }
+    if (!mapRef.current || !selectedFeature?.location) return;
+    const { lat, lng } = selectedFeature.location;
+    if (lat && lng) mapRef.current.flyTo([lat, lng], Math.max(mapRef.current.getZoom(), 7), { duration: 1 });
   }, [selectedFeature]);
 
+  // ── Flight markers ───────────────────────────────────────────────
+  useEffect(() => {
+    const L = LRef.current;
+    if (!L || !mapRef.current || !layersRef.current.flights) return;
+    const layer = layersRef.current.flights;
+    layer.clearLayers();
+
+    if (!showFlights && !showAllFlights) return;
+
+    const toRender = showAllFlights ? allFlights : allFlights.filter(f => f.isMilitary);
+
+    toRender.forEach((f) => {
+      if (!f.lat || !f.lng) return;
+      if (f.onGround) return; // skip ground traffic
+
+      const mil   = !!f.isMilitary;
+      const emer  = !!f.isEmergency;
+      const color = emer ? '#ff3333' : mil ? '#ff6b35' : '#4da6ff';
+      const glow  = emer ? 'rgba(255,51,51,0.7)' : mil ? 'rgba(255,107,53,0.5)' : 'rgba(77,166,255,0.25)';
+      const size  = mil ? 18 : 14;
+      const hdg   = f.heading || 0;
+
+      const icon = L.divIcon({
+        html: makeAircraftSvg(color, glow, hdg, size),
+        className: '',
+        iconSize:  [size, size],
+        iconAnchor:[size / 2, size / 2],
+      });
+
+      const altFt = f.altitude ? Math.round(f.altitude * 3.281).toLocaleString() : '—';
+      const kts   = f.velocity ? Math.round(f.velocity * 1.944) : '—';
+      const hdgD  = f.heading  ? Math.round(f.heading) : '—';
+
+      const marker = L.marker([f.lat, f.lng], { icon, zIndexOffset: mil ? 1000 : 400 });
+      marker.bindPopup(`
+        <div style="${popupStyle}border:1px solid ${mil ? 'rgba(255,107,53,0.5)' : '#1a2030'};">
+          <div style="font-size:7px;color:${color};letter-spacing:2px;margin-bottom:5px;">
+            ${emer ? '⚠ EMERGENCY' : mil ? '✈ MILITARY AIRCRAFT' : '✈ AIRCRAFT'}
+          </div>
+          <div style="font-size:14px;color:${color};font-weight:700;letter-spacing:1px;margin-bottom:7px;">
+            ${f.callsign || f.icao24 || '——'}
+          </div>
+          <table style="font-size:8px;color:#c8d4e0;border-collapse:collapse;width:100%;">
+            <tr>
+              <td style="color:#4a5568;padding-right:8px;">ALT</td>
+              <td>${altFt} ft</td>
+              <td style="color:#4a5568;padding:0 8px;">SPD</td>
+              <td>${kts} kts</td>
+            </tr>
+            <tr>
+              <td style="color:#4a5568;">HDG</td>
+              <td>${hdgD}°</td>
+              ${f.squawk ? `<td style="color:#4a5568;padding:0 8px;">SQWK</td><td>${f.squawk}</td>` : '<td></td><td></td>'}
+            </tr>
+          </table>
+          ${f.originCountry ? `<div style="font-size:7px;color:#2a3040;margin-top:5px;letter-spacing:1px;">ORIGIN: ${f.originCountry.toUpperCase()}</div>` : ''}
+        </div>`, { closeButton: false, className: 'gulf-popup' });
+
+      layer.addLayer(marker);
+    });
+  }, [allFlights, showFlights, showAllFlights]);
+
+  // ── Ship markers ─────────────────────────────────────────────────
+  useEffect(() => {
+    const L = LRef.current;
+    if (!L || !mapRef.current || !layersRef.current.ships) return;
+    const layer = layersRef.current.ships;
+    layer.clearLayers();
+
+    if (!showShips) return;
+
+    ships.forEach((s) => {
+      if (!s.lat || !s.lng) return;
+      const carrier = !!s.isCarrier;
+      const color   = carrier ? '#b57bee' : '#00d4aa';
+      const glow    = carrier ? 'rgba(181,123,238,0.6)' : 'rgba(0,212,170,0.4)';
+
+      const icon = L.divIcon({
+        html: makeShipSvg(color, glow),
+        className: '',
+        iconSize:  [18, 18],
+        iconAnchor:[9, 9],
+      });
+
+      const spd = s.speed ? s.speed.toFixed(1) : '—';
+      const hdg = s.heading ? Math.round(s.heading) : '—';
+
+      const marker = L.marker([s.lat, s.lng], { icon, zIndexOffset: carrier ? 1500 : 800 });
+      marker.bindPopup(`
+        <div style="${popupStyle}border:1px solid ${carrier ? 'rgba(181,123,238,0.5)' : 'rgba(0,212,170,0.3)'};">
+          <div style="font-size:7px;color:${color};letter-spacing:2px;margin-bottom:5px;">
+            ${carrier ? '⊕ AIRCRAFT CARRIER' : '⚓ NAVAL VESSEL'}
+          </div>
+          <div style="font-size:13px;color:${color};font-weight:700;letter-spacing:0.5px;margin-bottom:7px;">${s.name}</div>
+          <table style="font-size:8px;color:#c8d4e0;border-collapse:collapse;width:100%;">
+            <tr>
+              <td style="color:#4a5568;padding-right:8px;">SPD</td>
+              <td>${spd} kts</td>
+              <td style="color:#4a5568;padding:0 8px;">HDG</td>
+              <td>${hdg}°</td>
+            </tr>
+          </table>
+          ${s.destination && s.destination !== 'CLASSIFIED' ? `<div style="font-size:7px;color:#4a5568;margin-top:5px;">DEST: ${s.destination}</div>` : ''}
+          ${s.flag ? `<div style="font-size:7px;color:#2a3040;margin-top:3px;letter-spacing:1px;">FLAG: ${s.flag.toUpperCase()}</div>` : ''}
+        </div>`, { closeButton: false, className: 'gulf-popup' });
+
+      layer.addLayer(marker);
+    });
+  }, [ships, showShips]);
+
   return (
-    <div className="relative w-full h-full">
-      <div ref={mapContainerRef} className="w-full h-full" />
+    <>
+      <style>{`
+        .gulf-popup .leaflet-popup-content-wrapper,
+        .gulf-popup .leaflet-popup-tip-container {
+          background: transparent !important;
+          border: none !important;
+          box-shadow: none !important;
+          padding: 0 !important;
+        }
+        .gulf-popup .leaflet-popup-content {
+          margin: 0 !important;
+        }
+        .gulf-popup .leaflet-popup-tip { display: none !important; }
 
-      {/* Satellite control */}
-      <div className="absolute top-4 right-4 z-[1000]">
-        <button onClick={() => setShowLayerPanel(!showLayerPanel)}
-          className="bg-gray-900 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-lg border border-gray-700">
-          🛰️ Layers {showLayerPanel ? '▲' : '▼'}
-        </button>
-        {showLayerPanel && (
-          <div className="mt-2 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-4 w-60">
-            <p className="text-white text-xs font-semibold mb-3">NASA GIBS Satellite</p>
-            {GIBS_LAYERS.map((layer) => (
-              <button key={layer.id || 'none'} onClick={() => setSelectedLayer(layer)}
-                className={`w-full text-left px-3 py-2 rounded-lg text-xs mb-1 transition-colors ${selectedLayer.id === layer.id ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}>
-                {layer.name}
-              </button>
-            ))}
-            {selectedLayer.url && (
-              <div className="mt-3">
-                <label className="text-xs text-gray-400 block mb-1">Opacity: {Math.round(layerOpacity * 100)}%</label>
-                <input type="range" min="0.1" max="1" step="0.05" value={layerOpacity}
-                  onChange={(e) => setLayerOpacity(parseFloat(e.target.value))} className="w-full" />
-              </div>
-            )}
-            <p className="text-xs text-gray-600 mt-3 border-t border-gray-700 pt-2">Updated daily · Not live</p>
-          </div>
-        )}
-      </div>
-
-      {/* Live stats */}
-      <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-1">
-        {flightData && (
-          <div className="bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white">
-            ✈️ {flightData.count} flights · ⚠️ {flightData.military} mil
-          </div>
-        )}
-        {shipData && (
-          <div className="bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white">
-            🚢 {shipData.count} vessels · 🛸 {shipData.carriers} carriers
-          </div>
-        )}
-      </div>
-
-      {/* Legend */}
-      <div className="absolute bottom-6 left-4 z-[1000] bg-gray-900/90 rounded-lg p-3 border border-gray-700">
-        <p className="text-xs text-gray-400 font-semibold mb-2">LEGEND</p>
-        {[['🔴', 'Military'], ['🟠', 'Security'], ['🔵', 'News'], ['✈️', 'Aircraft'], ['🚢', 'Vessel'], ['🛸', 'Carrier']].map(([icon, label]) => (
-          <div key={label} className="flex items-center gap-2 mb-1">
-            <span className="text-sm">{icon}</span>
-            <span className="text-xs text-gray-300">{label}</span>
-          </div>
-        ))}
-      </div>
-
-      <style jsx global>{`
-        @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.5)} }
-        .leaflet-container { background: #1a1a2e; }
+        .leaflet-control-attribution {
+          background: rgba(8,11,15,0.6) !important;
+          color: #1a2030 !important;
+          font-size: 6px !important;
+        }
+        .leaflet-control-zoom {
+          border: 1px solid #1a2030 !important;
+          border-radius: 0 !important;
+        }
+        .leaflet-control-zoom a {
+          background: rgba(8,11,15,0.92) !important;
+          color: #4a5568 !important;
+          border-bottom: 1px solid #1a2030 !important;
+          border-radius: 0 !important;
+          width: 26px !important;
+          height: 26px !important;
+          line-height: 26px !important;
+          font-size: 14px !important;
+        }
+        .leaflet-control-zoom a:hover {
+          background: rgba(200,168,75,0.1) !important;
+          color: #c8a84b !important;
+        }
+        .leaflet-tile {
+          filter: brightness(0.88) saturate(0.6) hue-rotate(185deg);
+        }
       `}</style>
-    </div>
+      <div ref={containerRef} style={{ width: '100%', height: '100%', background: '#080b0f' }} />
+    </>
   );
 }
