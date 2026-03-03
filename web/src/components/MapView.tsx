@@ -155,3 +155,96 @@ export default function MapView({ features, selectedFeature, onFeatureSelect, sh
       shipMarkersRef.current = {};
       const ships = shipData?.ships || [];
       ships.forEach((s: any) => {
+        if (!s.lat || !s.lng) return;
+        const icon = L.divIcon({
+          className: '',
+          html: `<div style="font-size:${s.isCarrier ? '20' : '14'}px;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.9))">${s.isCarrier ? '🛸' : '🚢'}</div>`,
+          iconSize: [20, 20], iconAnchor: [10, 10],
+        });
+        const marker = L.marker([s.lat, s.lng], { icon, zIndexOffset: s.isCarrier ? 2000 : 800 });
+        marker.bindPopup(`
+          <div style="font-family:system-ui;max-width:220px">
+            <p style="margin:0 0 4px;font-weight:700;color:${s.isMilitary ? '#dc2626' : '#10b981'}">${s.isMilitary ? '⚔️ MILITARY' : '🚢'} ${s.name}</p>
+            ${s.isCarrier ? '<p style="margin:0;font-size:11px;color:#dc2626;font-weight:600">AIRCRAFT CARRIER</p>' : ''}
+            <p style="margin:0;font-size:11px;color:#666">🏴 ${s.flag || 'Unknown'} · ⚡ ${(s.speed || 0).toFixed(1)} knots</p>
+            <p style="margin:0;font-size:11px;color:#666">🧭 ${Math.round(s.heading || 0)}°</p>
+            ${s.destination ? `<p style="margin:0;font-size:11px;color:#666">🎯 ${s.destination}</p>` : ''}
+          </div>
+        `);
+        marker.addTo(mapRef.current!);
+        shipMarkersRef.current[s.mmsi] = marker;
+      });
+    });
+  }, [shipData, isMapReady, showShips]);
+
+  // Pan to selected
+  useEffect(() => {
+    if (selectedFeature?.location && mapRef.current) {
+      mapRef.current.flyTo([selectedFeature.location.lat, selectedFeature.location.lng], 10, { animate: true, duration: 1 });
+      markersRef.current[selectedFeature.id]?.openPopup();
+    }
+  }, [selectedFeature]);
+
+  return (
+    <div className="relative w-full h-full">
+      <div ref={mapContainerRef} className="w-full h-full" />
+
+      {/* Satellite control */}
+      <div className="absolute top-4 right-4 z-[1000]">
+        <button onClick={() => setShowLayerPanel(!showLayerPanel)}
+          className="bg-gray-900 text-white px-3 py-2 rounded-lg text-sm font-medium shadow-lg border border-gray-700">
+          🛰️ Layers {showLayerPanel ? '▲' : '▼'}
+        </button>
+        {showLayerPanel && (
+          <div className="mt-2 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-4 w-60">
+            <p className="text-white text-xs font-semibold mb-3">NASA GIBS Satellite</p>
+            {GIBS_LAYERS.map((layer) => (
+              <button key={layer.id || 'none'} onClick={() => setSelectedLayer(layer)}
+                className={`w-full text-left px-3 py-2 rounded-lg text-xs mb-1 transition-colors ${selectedLayer.id === layer.id ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}>
+                {layer.name}
+              </button>
+            ))}
+            {selectedLayer.url && (
+              <div className="mt-3">
+                <label className="text-xs text-gray-400 block mb-1">Opacity: {Math.round(layerOpacity * 100)}%</label>
+                <input type="range" min="0.1" max="1" step="0.05" value={layerOpacity}
+                  onChange={(e) => setLayerOpacity(parseFloat(e.target.value))} className="w-full" />
+              </div>
+            )}
+            <p className="text-xs text-gray-600 mt-3 border-t border-gray-700 pt-2">Updated daily · Not live</p>
+          </div>
+        )}
+      </div>
+
+      {/* Live stats */}
+      <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-1">
+        {flightData && (
+          <div className="bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white">
+            ✈️ {flightData.count} flights · ⚠️ {flightData.military} mil
+          </div>
+        )}
+        {shipData && (
+          <div className="bg-gray-900/90 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white">
+            🚢 {shipData.count} vessels · 🛸 {shipData.carriers} carriers
+          </div>
+        )}
+      </div>
+
+      {/* Legend */}
+      <div className="absolute bottom-6 left-4 z-[1000] bg-gray-900/90 rounded-lg p-3 border border-gray-700">
+        <p className="text-xs text-gray-400 font-semibold mb-2">LEGEND</p>
+        {[['🔴', 'Military'], ['🟠', 'Security'], ['🔵', 'News'], ['✈️', 'Aircraft'], ['🚢', 'Vessel'], ['🛸', 'Carrier']].map(([icon, label]) => (
+          <div key={label} className="flex items-center gap-2 mb-1">
+            <span className="text-sm">{icon}</span>
+            <span className="text-xs text-gray-300">{label}</span>
+          </div>
+        ))}
+      </div>
+
+      <style jsx global>{`
+        @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.5)} }
+        .leaflet-container { background: #1a1a2e; }
+      `}</style>
+    </div>
+  );
+}
